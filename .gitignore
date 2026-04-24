@@ -1,0 +1,20 @@
+# Local recovery workspace
+_recovered-private/
+recovered-private/
+
+# Environment and local config
+.env
+.env.*
+*.local
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs and build outputs
+*.log
+build/
+dist/
+out/
