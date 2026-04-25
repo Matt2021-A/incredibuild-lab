@@ -21,6 +21,70 @@ This allows the lab to support two paths:
 
 The default should be local lab mode, because the purpose of this project is to reduce first-run friction.
 
+## Installer capability findings
+
+Installer help confirms the unified installer supports multiple roles directly:
+
+```text
+--coordinator enabled|disabled
+--secondary-coordinator enabled|disabled
+--initiator enabled|disabled
+--helper enabled|disabled
+--build-cache-service enabled|disabled
+```
+
+The lower-level `ibsetup_linux_2097.ubin install` help confirms shorthand role flags:
+
+```text
+-C, --coordinator             primary Coordinator activation
+-E, --secondary-coordinator   secondary Coordinator activation
+-I, --initiator               Initiator activation
+-H, --helper                  Helper activation
+-S                            Initiator and Helper activation, alias to -I -H
+-Y, --build-cache-service     Build Cache Service
+```
+
+Mandatory install options:
+
+```text
+-A, --data-dir=<path>
+-O, --coordinator-machine=<coordinator> required only when -C is not given
+```
+
+Important defaults:
+
+```text
+-G, --local-http-port=<port>  default 8080
+-L, --local-https-port=<port> default 8081
+-N, --utility-port=<port>     default 9953
+-R, --license-type=<type>     DEFAULT or SUVM
+```
+
+Key implication: a Coordinator install does not require `--coordinator-machine`. That gives the rebuild a clean local-first path.
+
+## Proposed install strategy
+
+Default lab mode should perform a first-run Coordinator plus local worker install.
+
+The likely first-run install command shape is:
+
+```bash
+/root/incredibuild_4.13.0.run \
+  --action install \
+  --accept-eula true \
+  --coordinator enabled \
+  --initiator enabled \
+  --helper enabled \
+  --data-dir "$IB_DATA_DIR" \
+  --local-http-port "$IB_LOCAL_HTTP_PORT" \
+  --local-https-port "$IB_LOCAL_HTTPS_PORT" \
+  --utility-port "$IB_UTILITY_PORT" \
+  --license-type "$IB_LICENSE_TYPE" \
+  --disable-telemetry true
+```
+
+This command still needs validation. The important design correction is that local all-in-one mode should enable Coordinator first and should not point the install at a fixed external Coordinator.
+
 ## What the new image should not do
 
 The rebuilt image should not:
@@ -42,9 +106,9 @@ Expected behavior:
 
 1. Validate installer and required files exist.
 2. Run local setup using a runtime-safe configuration.
-3. Enable or start Coordinator behavior if supported.
-4. Enable or start server/agent behavior if supported.
-5. Enable or start helper behavior if supported.
+3. Enable or start Coordinator behavior.
+4. Enable or start server/agent behavior.
+5. Enable or start helper behavior.
 6. Enable UI/httpd behavior if supported.
 7. Print status and useful endpoints.
 8. Keep the container alive after startup.
@@ -57,7 +121,8 @@ Expected behavior:
 
 1. Require `IB_COORDINATOR`.
 2. Install or configure as an Initiator pointed at that Coordinator.
-3. Fail clearly if the Coordinator is not reachable.
+3. Use `--skip-coordinator-test true` only when intentionally requested for offline or staged setup.
+4. Fail clearly if the Coordinator is not reachable and skip-test is not enabled.
 
 This should not be the default mode.
 
@@ -69,12 +134,18 @@ IB_VERSION=4.13.0
 IB_DATA_DIR=/etc/incredibuild
 IB_INSTALL_DIR=/opt/incredibuild
 IB_COORDINATOR=localhost
+IB_LOCAL_HTTP_PORT=8080
+IB_LOCAL_HTTPS_PORT=8081
+IB_UTILITY_PORT=9953
+IB_LICENSE_TYPE=SUVM
+IB_DISABLE_TELEMETRY=true
+IB_ACCEPT_EULA=false
 IB_MAX_INITIATOR_CORES=8
 IB_RUN_SAMPLE=false
 IB_KEEPALIVE=true
 ```
 
-These are placeholders until the service model is confirmed.
+`IB_ACCEPT_EULA` should be explicit. The image should not silently accept license terms unless the user opts in.
 
 ## Proposed entrypoint behavior
 
@@ -88,29 +159,45 @@ set -euo pipefail
 
 # 1. Print startup banner and mode.
 # 2. Validate installer or installed runtime path.
-# 3. If not installed, perform first-run install based on IB_LAB_MODE.
-# 4. Verify required binaries and config paths.
-# 5. Start services in known order.
-# 6. Optionally run sample build.
-# 7. Print logs/status hints.
-# 8. Keep foreground process alive.
+# 3. Require IB_ACCEPT_EULA=true before first-run install.
+# 4. If not installed, perform first-run install based on IB_LAB_MODE.
+# 5. Verify required binaries and config paths.
+# 6. Start services in known order.
+# 7. Optionally run sample build.
+# 8. Print logs/status hints.
+# 9. Keep foreground process alive.
 ```
 
-## First-run install open question
+## First-run install decision
 
-The critical technical question is how to install or activate a local Coordinator without requiring an external Coordinator.
+The installer supports a local Coordinator role. This resolves the earlier open question.
 
-The old build ran:
+The all-in-one model should be based on:
 
 ```text
---initiator enabled --coordinator-machine <old local IP> --license-type SUVM
+--coordinator enabled
+--initiator enabled
+--helper enabled
 ```
 
-That is the wrong default for the rebuilt lab image.
+not:
 
-The next inspection pass needs to determine whether the installer supports a Coordinator install mode, an all-in-one role combination, or post-install toggles using the management scripts.
+```text
+--initiator enabled --coordinator-machine <old local IP>
+```
 
-## Service model open question
+The next validation step is to run the installer in a disposable container with Coordinator, Initiator, and Helper enabled, then inspect whether it creates:
+
+```text
+/opt/incredibuild
+/etc/incredibuild
+/opt/incredibuild/etc/init.d/incredibuild_coordinator
+/opt/incredibuild/etc/init.d/incredibuild_server
+/opt/incredibuild/etc/init.d/incredibuild_helper
+/opt/incredibuild/etc/init.d/incredibuild_httpd
+```
+
+## Service model finding
 
 The extracted payload includes scripts such as:
 
@@ -124,7 +211,9 @@ set_agent_params.py
 manage_ui_access.sh
 ```
 
-These likely modify service configuration, database state, symlinks, or init behavior. They must be inspected before writing the real entrypoint.
+Inspection shows the enable/disable scripts are symlink-and-start wrappers. They rely on a completed install layout under `/opt/incredibuild` and `/etc/incredibuild`.
+
+Do not call these scripts until the install layout is verified.
 
 ## Sample build path
 
@@ -140,9 +229,17 @@ The new project should not clone an external repo during default startup.
 
 Better pattern:
 
+- Use the bundled `samples/make_build` sample first.
 - Include a documented optional sample build command.
-- Prefer a small local sample checked into the repo if licensing permits.
 - Gate sample execution behind `IB_RUN_SAMPLE=true`.
+
+Validated sample docs from the payload indicate this shape:
+
+```bash
+ib_console make -j30
+```
+
+The exact path and command should be validated after a successful all-in-one install.
 
 ## Docker tag strategy
 
@@ -170,9 +267,12 @@ Only after that works should the project add a Kubernetes example.
 
 ## Next engineering tasks
 
-1. Inspect the service scripts inside the extracted payload.
-2. Inspect the samples directory.
-3. Determine installer flags for local Coordinator or all-in-one setup.
-4. Draft `entrypoint.sh` skeleton.
-5. Draft new `Dockerfile` skeleton using first-run install model.
-6. Validate locally before publishing any image tag.
+1. Run a disposable first-run install test using Coordinator plus Initiator plus Helper roles.
+2. Verify `/opt/incredibuild` and `/etc/incredibuild` are created.
+3. Verify init scripts exist under `/opt/incredibuild/etc/init.d`.
+4. Start Coordinator, server, helper, and httpd services if not already running.
+5. Confirm ports `8080`, `8081`, and `9953` listeners.
+6. Validate the bundled `make_build` sample.
+7. Draft `entrypoint.sh` skeleton.
+8. Draft new `Dockerfile` skeleton using first-run install model.
+9. Validate locally before publishing any image tag.
