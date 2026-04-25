@@ -62,11 +62,36 @@ Important defaults:
 
 Key implication: a Coordinator install does not require `--coordinator-machine`. That gives the rebuild a clean local-first path.
 
+## Data directory validation finding
+
+A first validation attempt used:
+
+```text
+--data-dir /etc/incredibuild
+```
+
+The installer rejected it with:
+
+```text
+The data directory cannot be /etc/incredibuild
+```
+
+No install layout was created after that failure:
+
+```text
+/opt/incredibuild             missing
+/etc/incredibuild             missing
+/opt/incredibuild/etc/init.d  missing
+/etc/incredibuild/init.d      missing
+```
+
+The inspected container also lacks basic diagnostic tools such as `ps`, `ss`, and `netstat`, so the rebuilt image should include enough tooling to validate runtime state without making users install tools by hand.
+
 ## Proposed install strategy
 
 Default lab mode should perform a first-run Coordinator plus local worker install.
 
-The likely first-run install command shape is:
+The likely first-run install command shape is now:
 
 ```bash
 /root/incredibuild_4.13.0.run \
@@ -75,7 +100,7 @@ The likely first-run install command shape is:
   --coordinator enabled \
   --initiator enabled \
   --helper enabled \
-  --data-dir "$IB_DATA_DIR" \
+  --data-dir "$IB_DATA_ROOT" \
   --local-http-port "$IB_LOCAL_HTTP_PORT" \
   --local-https-port "$IB_LOCAL_HTTPS_PORT" \
   --utility-port "$IB_UTILITY_PORT" \
@@ -83,7 +108,17 @@ The likely first-run install command shape is:
   --disable-telemetry true
 ```
 
-This command still needs validation. The important design correction is that local all-in-one mode should enable Coordinator first and should not point the install at a fixed external Coordinator.
+`IB_DATA_ROOT` must not be `/etc/incredibuild`. Candidate values to validate:
+
+```text
+/var/lib/incredibuild
+/ib-data
+/etc/ib_core
+```
+
+The historical failed build used `/etc/` and produced core args pointing at `/etc//ib_core`, so `/etc/ib_core` is a plausible compatibility candidate. A more container-idiomatic candidate is `/var/lib/incredibuild`.
+
+This command still needs validation with an accepted data directory. The important design correction is that local all-in-one mode should enable Coordinator first and should not point the install at a fixed external Coordinator.
 
 ## What the new image should not do
 
@@ -131,7 +166,7 @@ This should not be the default mode.
 ```text
 IB_LAB_MODE=all-in-one
 IB_VERSION=4.13.0
-IB_DATA_DIR=/etc/incredibuild
+IB_DATA_ROOT=/var/lib/incredibuild
 IB_INSTALL_DIR=/opt/incredibuild
 IB_COORDINATOR=localhost
 IB_LOCAL_HTTP_PORT=8080
@@ -146,6 +181,24 @@ IB_KEEPALIVE=true
 ```
 
 `IB_ACCEPT_EULA` should be explicit. The image should not silently accept license terms unless the user opts in.
+
+## Proposed base image tooling
+
+The rebuilt image should include a small set of diagnostic and build tools:
+
+```text
+bash
+ca-certificates
+curl
+git
+gcc
+make
+procps
+iproute2
+net-tools
+```
+
+`procps`, `iproute2`, and `net-tools` are included so basic commands such as `ps`, `ss`, and `netstat` are available during lab validation and troubleshooting.
 
 ## Proposed entrypoint behavior
 
@@ -186,7 +239,7 @@ not:
 --initiator enabled --coordinator-machine <old local IP>
 ```
 
-The next validation step is to run the installer in a disposable container with Coordinator, Initiator, and Helper enabled, then inspect whether it creates:
+The next validation step is to run the installer in a disposable container with Coordinator, Initiator, and Helper enabled using an accepted data directory, then inspect whether it creates:
 
 ```text
 /opt/incredibuild
@@ -267,12 +320,13 @@ Only after that works should the project add a Kubernetes example.
 
 ## Next engineering tasks
 
-1. Run a disposable first-run install test using Coordinator plus Initiator plus Helper roles.
-2. Verify `/opt/incredibuild` and `/etc/incredibuild` are created.
-3. Verify init scripts exist under `/opt/incredibuild/etc/init.d`.
-4. Start Coordinator, server, helper, and httpd services if not already running.
-5. Confirm ports `8080`, `8081`, and `9953` listeners.
-6. Validate the bundled `make_build` sample.
-7. Draft `entrypoint.sh` skeleton.
-8. Draft new `Dockerfile` skeleton using first-run install model.
-9. Validate locally before publishing any image tag.
+1. Retry the disposable first-run install test with an accepted data directory, starting with `/var/lib/incredibuild`.
+2. If that fails, test `/ib-data`, then `/etc/ib_core`.
+3. Verify `/opt/incredibuild` and `/etc/incredibuild` are created.
+4. Verify init scripts exist under `/opt/incredibuild/etc/init.d`.
+5. Start Coordinator, server, helper, and httpd services if not already running.
+6. Confirm ports `8080`, `8081`, and `9953` listeners.
+7. Validate the bundled `make_build` sample.
+8. Draft `entrypoint.sh` skeleton.
+9. Draft new `Dockerfile` skeleton using first-run install model.
+10. Validate locally before publishing any image tag.
