@@ -85,13 +85,109 @@ No install layout was created after that failure:
 /etc/incredibuild/init.d      missing
 ```
 
-The inspected container also lacks basic diagnostic tools such as `ps`, `ss`, and `netstat`, so the rebuilt image should include enough tooling to validate runtime state without making users install tools by hand.
+A second validation attempt used:
+
+```text
+--data-dir /var/lib/incredibuild
+```
+
+That path was accepted, and the install completed far enough to create the expected runtime layout.
+
+## Successful first-run install validation
+
+This command completed inside a disposable container:
+
+```bash
+/root/incredibuild_4.13.0.run \
+  --action install \
+  --accept-eula true \
+  --coordinator enabled \
+  --initiator enabled \
+  --helper enabled \
+  --data-dir /var/lib/incredibuild \
+  --local-http-port 8080 \
+  --local-https-port 8081 \
+  --utility-port 9953 \
+  --license-type SUVM \
+  --disable-telemetry true
+```
+
+Installer output included:
+
+```text
+Starting incredibuild core install
+IncrediBuild Single-Use VM Agent (SUVM) installed
+Starting incredibuild manager install
+Incredibuild manager installation ...
+Incredibuild manager installation: done
+Saving parameters
+Starting incredibuild manager services
+Service 'incredibuild-manager-service' not found.
+Service 'incredibuild-message-broker-service' not found.
+Incredibuild installation: done
+```
+
+The manager service warnings did not stop the install from creating the core runtime layout. They should be tracked separately during service validation.
+
+Created runtime paths:
+
+```text
+/opt/incredibuild
+/etc/incredibuild -> /var/lib/incredibuild/ib_core
+/var/lib/incredibuild/ib_core
+/var/lib/incredibuild/ib_manager
+/opt/incredibuild/etc/init.d
+/etc/incredibuild/init.d
+```
+
+Important install markers and config files found under `/opt/incredibuild`:
+
+```text
+.done
+.ib_do_not_start_services_after_install
+.ib_install_command
+.ib_storage_dir
+```
+
+The `.ib_do_not_start_services_after_install` marker is important. The entrypoint should not assume the installer leaves all services running.
+
+Expected init scripts were created under `/opt/incredibuild/etc/init.d`, including:
+
+```text
+incredibuild
+incredibuild_babysit
+incredibuild_coordinator
+incredibuild_dataaccess
+incredibuild_helper
+incredibuild_httpd
+incredibuild_info
+incredibuild_secstorage
+incredibuild_server
+incredibuild_telemetry
+incredibuild_upgrade
+incredibuild_watchdog
+```
+
+Symlinks were created under `/etc/incredibuild/init.d`, including:
+
+```text
+incredibuild_babysit
+incredibuild_coordinator
+incredibuild_dataaccess
+incredibuild_helper
+incredibuild_httpd
+incredibuild_info
+incredibuild_server
+incredibuild_watchdog
+```
+
+This validates the core rebuild assumption: local all-in-one first-run install is technically viable using `/var/lib/incredibuild` as the data root.
 
 ## Proposed install strategy
 
-Default lab mode should perform a first-run Coordinator plus local worker install.
+Default lab mode should perform a first-run Coordinator plus local worker install using `/var/lib/incredibuild` as the default data root.
 
-The likely first-run install command shape is now:
+The first-run install command shape is now:
 
 ```bash
 /root/incredibuild_4.13.0.run \
@@ -108,17 +204,7 @@ The likely first-run install command shape is now:
   --disable-telemetry true
 ```
 
-`IB_DATA_ROOT` must not be `/etc/incredibuild`. Candidate values to validate:
-
-```text
-/var/lib/incredibuild
-/ib-data
-/etc/ib_core
-```
-
-The historical failed build used `/etc/` and produced core args pointing at `/etc//ib_core`, so `/etc/ib_core` is a plausible compatibility candidate. A more container-idiomatic candidate is `/var/lib/incredibuild`.
-
-This command still needs validation with an accepted data directory. The important design correction is that local all-in-one mode should enable Coordinator first and should not point the install at a fixed external Coordinator.
+The important design correction is that local all-in-one mode should enable Coordinator first and should not point the install at a fixed external Coordinator.
 
 ## What the new image should not do
 
@@ -141,12 +227,13 @@ Expected behavior:
 
 1. Validate installer and required files exist.
 2. Run local setup using a runtime-safe configuration.
-3. Enable or start Coordinator behavior.
-4. Enable or start server/agent behavior.
-5. Enable or start helper behavior.
-6. Enable UI/httpd behavior if supported.
-7. Print status and useful endpoints.
-8. Keep the container alive after startup.
+3. Verify `/opt/incredibuild` and `/etc/incredibuild` exist.
+4. Start Coordinator behavior.
+5. Start server/agent behavior.
+6. Start helper behavior.
+7. Start UI/httpd behavior if supported.
+8. Print status and useful endpoints.
+9. Keep the container alive after startup.
 
 ### `IB_LAB_MODE=initiator`
 
@@ -239,16 +326,7 @@ not:
 --initiator enabled --coordinator-machine <old local IP>
 ```
 
-The next validation step is to run the installer in a disposable container with Coordinator, Initiator, and Helper enabled using an accepted data directory, then inspect whether it creates:
-
-```text
-/opt/incredibuild
-/etc/incredibuild
-/opt/incredibuild/etc/init.d/incredibuild_coordinator
-/opt/incredibuild/etc/init.d/incredibuild_server
-/opt/incredibuild/etc/init.d/incredibuild_helper
-/opt/incredibuild/etc/init.d/incredibuild_httpd
-```
+The next validation step is service startup and listener validation after the completed first-run install.
 
 ## Service model finding
 
@@ -266,7 +344,7 @@ manage_ui_access.sh
 
 Inspection shows the enable/disable scripts are symlink-and-start wrappers. They rely on a completed install layout under `/opt/incredibuild` and `/etc/incredibuild`.
 
-Do not call these scripts until the install layout is verified.
+After first-run install, that layout now exists.
 
 ## Sample build path
 
@@ -292,7 +370,7 @@ Validated sample docs from the payload indicate this shape:
 ib_console make -j30
 ```
 
-The exact path and command should be validated after a successful all-in-one install.
+The exact path and command should be validated after service startup.
 
 ## Docker tag strategy
 
@@ -320,13 +398,10 @@ Only after that works should the project add a Kubernetes example.
 
 ## Next engineering tasks
 
-1. Retry the disposable first-run install test with an accepted data directory, starting with `/var/lib/incredibuild`.
-2. If that fails, test `/ib-data`, then `/etc/ib_core`.
-3. Verify `/opt/incredibuild` and `/etc/incredibuild` are created.
-4. Verify init scripts exist under `/opt/incredibuild/etc/init.d`.
-5. Start Coordinator, server, helper, and httpd services if not already running.
-6. Confirm ports `8080`, `8081`, and `9953` listeners.
-7. Validate the bundled `make_build` sample.
-8. Draft `entrypoint.sh` skeleton.
-9. Draft new `Dockerfile` skeleton using first-run install model.
-10. Validate locally before publishing any image tag.
+1. Start services after successful first-run install.
+2. Confirm ports `8080`, `8081`, and `9953` listeners.
+3. Confirm `ib_console`, `ib_info`, and service scripts work from the installed `/opt/incredibuild` path.
+4. Validate the bundled `make_build` sample.
+5. Draft `entrypoint.sh` skeleton.
+6. Draft new `Dockerfile` skeleton using first-run install model.
+7. Validate locally before publishing any image tag.
